@@ -1,0 +1,130 @@
+name: Build Steam Deck GUI Fix
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    env:
+      # The upstream build script checks that this exists even in Publish mode.
+      RELOADEDIIMODS: ${{ github.workspace }}\dummy-reloaded-mods
+
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust downloads
+        uses: Swatinem/rust-cache@v2
+
+      - name: Apply Steam Deck GUI-size fix
+        shell: pwsh
+        run: |
+          $file = "p5r-freecam/src/gui/app.rs"
+          $text = Get-Content $file -Raw
+
+          $old = @'
+              // for now: always open in Display 1 at half resolution, near the top left
+              let mut main_disp_res = Vec2::new(unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32, unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32 );
+              let win_pos = Vec2::new(50., 50.);
+              // create a square equal to 1/2 of height
+              main_disp_res.x = main_disp_res.y;
+              main_disp_res /= 2.;
+              App::show_window(win_pos, main_disp_res, main_icon)
+          '@
+
+          $new = @'
+              // Steam Deck/Desktop fix: avoid the original ~400x400 window.
+              let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
+              let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
+              let win_pos = Vec2::new(50., 50.);
+
+              let win_w = 900.0_f32.min((screen_w - 100.0).max(640.0));
+              let win_h = 700.0_f32.min((screen_h - 100.0).max(520.0));
+
+              App::show_window(win_pos, Vec2::new(win_w, win_h), main_icon)
+          '@
+
+          if (-not $text.Contains($old)) {
+            Write-Host "The exact original block was not found. Showing nearby source:"
+            Select-String -Path $file -Pattern "main_disp_res|show_window|GetSystemMetrics" -Context 4,4
+            throw "Patch could not be applied because upstream source changed."
+          }
+
+          $text = $text.Replace($old, $new)
+          Set-Content -Path $file -Value $text -Encoding utf8
+          git diff -- $file
+
+      - name: Create required dummy directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path $env:RELOADEDIIMODS
+
+      - name: Build publish package
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process Bypass
+          ./Build.ps1 -Publish $true
+
+      - name: Collect build outputs
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ci-artifacts | Out-Null
+
+          $patterns = @(
+            "p5r_freecam.dll",
+            "p5rpc.freecam.dll",
+            "Mod.zip",
+            "*freecam*.zip",
+            "*freecam*.7z"
+          )
+
+          $found = @()
+          foreach ($pattern in $patterns) {
+            $found += Get-ChildItem -Path . -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.FullName -notmatch "\\ci-artifacts\\" -and
+                $_.FullName -notmatch "\\.git\\"
+              }
+          }
+
+          $found = $found | Sort-Object FullName -Unique
+          if (-not $found) {
+            Write-Host "No expected output files were found. Listing recently modified files:"
+            Get-ChildItem -Path . -Recurse -File |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 100 FullName, Length, LastWriteTime
+            throw "Build completed without a discoverable DLL or archive."
+          }
+
+          $i = 0
+          foreach ($item in $found) {
+            $i++
+            $safeName = "{0:D2}-{1}" -f $i, $item.Name
+            Copy-Item $item.FullName (Join-Path "ci-artifacts" $safeName)
+            Write-Host "Collected: $($item.FullName)"
+          }
+
+          Get-ChildItem ci-artifacts | Format-Table Name, Length
+
+      - name: Upload patched mod
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p5r-freecam-steamdeck-gui-fix
+          path: ci-artifacts/
+          if-no-files-found: error
