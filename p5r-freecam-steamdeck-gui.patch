@@ -1,0 +1,28 @@
+diff --git a/p5r-freecam/src/gui/app.rs b/p5r-freecam/src/gui/app.rs
+index 0000000..1111111 100644
+--- a/p5r-freecam/src/gui/app.rs
++++ b/p5r-freecam/src/gui/app.rs
+@@ -214,12 +214,18 @@ pub fn init_debug_window() -> Result<(), Box<dyn Error>> {
+     let proc = ProcessInfo::get_current_process().unwrap();
+     let main_icon = unsafe { std::mem::transmute::<usize, PCSTR>(0x69) }; // icon ID defined in CreateWindow
+     let main_icon = unsafe { LoadIconA(Some(proc.get_main_module().as_raw().into()), main_icon).ok() };
+-    // for now: always open in Display 1 at half resolution, near the top left
+-    let mut main_disp_res = Vec2::new(unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32, unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32 );
++
++    // Steam Deck/Desktop fix:
++    // The original code creates a square window equal to half the display height.
++    // At 1280x800 or 1366x768 this is only ~400x400, which makes the toolbar
++    // overlap. Give the UI a sensible minimum width while keeping it on-screen.
++    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
++    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
+     let win_pos = Vec2::new(50., 50.);
+-    // create a square equal to 1/2 of height
+-    main_disp_res.x = main_disp_res.y;
+-    main_disp_res /= 2.;
+-    App::show_window(win_pos, main_disp_res, main_icon)
++
++    let win_w = 900.0_f32.min((screen_w - 100.0).max(640.0));
++    let win_h = 700.0_f32.min((screen_h - 100.0).max(520.0));
++
++    App::show_window(win_pos, Vec2::new(win_w, win_h), main_icon)
+ }
